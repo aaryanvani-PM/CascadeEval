@@ -1,0 +1,6 @@
+{
+  "name": "CascadeEval: Model Router & FinOps Gateway",
+  "description": "Enterprise AI gateway with dynamic query complexity routing across Gemini tiers, context caching, 200k token cliff guard, and continuous pairwise autorater evaluation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
