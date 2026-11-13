@@ -1,60 +1,96 @@
-# CascadeEval: LLM Router and FinOps Gateway
+# CascadeEval
 
-A prototype gateway that sends each request to the cheapest Gemini tier likely to handle it, and checks whether the cheaper answer holds up against a stronger model. Built for product and platform teams who want to cut inference cost without guessing how much quality they give up.
+**An LLM routing and evaluation prototype for exploring response quality, latency, and inference cost.**
 
-**Status:** Working prototype. Built in Google AI Studio; exported to GitHub on 22 October 2026.
+Route a prompt across Gemini tiers, inspect the decision, compare candidate answers, and model the economics before committing to an architecture.
 
-## What it does
+[Try the deployed sandbox](https://cascadeeval.ai.studio/) · [Routing implementation](server.ts) · [Cost model](src/utils/finopsMath.ts)
 
-- **Routes by complexity.** A heuristic scores each prompt from 0.0 to 1.0 (reasoning intensity, domain difficulty, constraint density, entropy, token ratio) and picks one of three tiers: Gemini 2.5 Flash-Lite, 2.5 Flash, or 2.5 Pro.
-- **Judges quality pairwise.** Gemini 2.5 Pro compares two candidate answers on grounding, instruction adherence, coherence, and safety, then runs a second pass with the order swapped to check for position bias.
-- **Models cost.** A FinOps calculator estimates blended cost per 1K requests across tiers and cache-hit rates.
-- **Shows telemetry.** A dashboard summarizes routing decisions, cache hits, fallbacks, and latency.
+**Status:** Portfolio prototype built in Google AI Studio. Sandbox mode is the default; live Gemini inference is optional. Demo figures are not validated production benchmarks.
 
-## How it works
+## The product question
 
-React and Vite front end, Express server (`server.ts`) that calls the Gemini API through `@google/genai`.
+When can a cheaper model handle a request, and what evidence would justify escalation? CascadeEval makes that decision inspectable through a complexity score, tier selection, projected cost, and candidate comparison.
 
-| Endpoint | What it does |
-|---|---|
-| `POST /api/gateway/route` | Scores the prompt, picks a tier, calls that Gemini model, returns the answer with measured latency |
-| `POST /api/gateway/autorate` | Pairwise LLM-as-judge comparison with a position-swap pass |
-| `GET /api/gateway/stats` | Aggregates the request log for the telemetry view |
-| `POST /api/gateway/simulate-batch` | Loads a fixed set of sample prompts for a demo run |
+## Explore the workflow
 
-## What's real and what's simulated
+1. In **Router Playground**, choose a preset or enter a prompt. Inspect the five complexity factors and selected tier.
+2. Compare a compact extraction request with a harder reasoning request. The heuristic can misroute either; its score is not a quality guarantee.
+3. Send a result to the **Pairwise Autorater** and supply a comparison answer. Candidate B starts as an editable example, rather than a freshly generated frontier answer.
+4. Use the **FinOps Calculator** to vary traffic mix, tokens, and cache-hit assumptions. Treat savings as a scenario.
+5. In **Telemetry**, inspect recent requests or seed synthetic records with the batch action.
 
-**Real, when a Gemini API key is set**
-- Routing calls to the three Gemini 2.5 tiers, with latency timed on the server.
-- The pairwise judge call to Gemini 2.5 Pro.
+## What is implemented
 
-**Simulated or assumed**
-- Without a key, or if a call fails, the app falls back to a deterministic sandbox with canned answers and randomized latency around preset values.
-- The batch simulator uses a fixed list of sample prompts with preset complexity scores.
-- Context caching is modeled: the cache key is a SHA-256 hash of the system prompt and context, and a hit assumes 85% of input tokens are cached.
-- Rate-limit and schema-error fallbacks are triggered by toggles in the UI, not by real failures.
-- The complexity weights (40/30/15/10/5) are product judgment, not fitted to data.
-- Latency figures on the documentation page are design targets.
+| Capability | Current behavior |
+| --- | --- |
+| Routing | Rule-based score from reasoning keywords, domain terms, constraints, lexical diversity, and estimated tokens; thresholds select one of three tiers. |
+| Live generation | With a server-side key **and Live Gemini Mode enabled**, calls `gemini-2.5-flash-lite`, `gemini-2.5-flash`, or `gemini-2.5-pro`. |
+| Candidate judging | One optional Gemini 2.5 Pro call scores two supplied answers on grounding, instructions, coherence, and safety. |
+| Economics | Local formulas project per-request and blended costs from configured prices and token assumptions. |
+| Request log | In-memory rolling telemetry, including simulated requests; up to 100 records, reset on server restart. |
 
-## What I learned
+### Read the results correctly
 
-- A keyword-style heuristic is cheap and fast, but it can misread a short, hard prompt as easy. The real risk in routing is the misroute rate, not the average saving.
-- LLM-as-judge needs a bias check. Swapping the order of the two answers is the simplest guard against the judge favoring whichever it reads first.
-- Cost savings depend heavily on the cache-hit rate, so a routing business case should be modeled with and without caching.
+- **Sandbox:** Canned responses with randomized latency. Missing credentials or failed live generation also lead to sandbox output. Check `result.isSimulated` in the route response.
+- **Judge bias:** The UI displays two presentation orders, but the server copies the first winner into the second result. No independent swapped-order call runs, so the display does not establish absence of position bias. Failed live judging can retain preset scores and a live-looking model label.
+- **Model labels:** Some UI labels say Gemini 3.5 Flash / 3.1 Pro; actual live requests use the Gemini 2.5 IDs above. Prices and latency presets in [`MODEL_TIERS`](src/types/gateway.ts) are static assumptions.
+- **Latency:** Successful live generation duration is timed on the server. Time to first token is estimated from that duration; generation does not stream. Sandbox latency and historical accuracy/P95/P99 charts are illustrative.
+- **Cost:** Input tokens are estimated from characters; output tokens are fixed for the projection. Even `actualCostUsd` is modeled, rather than provider billing or usage metadata.
+- **Caching and context limits:** SHA-256 fingerprints are computed, but cache hits and discounts are simulated. The context-cliff guard changes accounting values; it does not truncate the context sent to Gemini or create a provider cache.
+- **Recovery and batch:** UI toggles simulate rate-limit/schema fallback decisions. Retry/backoff, a circuit breaker, schema-validation recovery, and provider Batch API jobs are not implemented. Async-batch mode changes cost assumptions.
 
-## Next steps
+No measured routing accuracy, quality parity, or realized cost reduction is claimed. UI terms such as “GA,” “enterprise,” and “FLAMe-aligned” describe prototype intent, rather than a production release or external validation.
 
-- Label a set of prompts with the tier a judge prefers, and measure how often the heuristic picks a different tier.
-- Fit the complexity weights to that labeled set instead of setting them by hand.
+## Architecture
 
-## Run it locally
+```mermaid
+flowchart LR
+    UI[React and Vite workbench] --> API[Express API]
+    API --> R[Heuristic router]
+    R --> M{Live mode and key?}
+    M -->|Yes| G[Gemini 2.5 tier]
+    M -->|No or call failure| S[Canned sandbox output]
+    API --> J[Single-call judge or preset scores]
+    R --> C[Local cost projection]
+    API --> L[In-memory request log]
+    L --> T[Telemetry view]
+```
 
-Requires Node.js.
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/gateway/route` | Routing decision and live or simulated output. |
+| `POST /api/gateway/autorate` | Compare two supplied candidates with live or preset scores. |
+| `GET /api/gateway/stats` | Aggregate the in-memory log; demo defaults when empty. |
+| `POST /api/gateway/simulate-batch` | Add synthetic sample requests. |
+
+## Run locally
+
+Checked with Node.js 24 and npm 11. The current manifest has a Vite/esbuild peer conflict; skipping peer resolution also leaves Recharts' `react-is` peer missing. This temporary local install gets the existing source running without changing dependency files:
 
 ```bash
-npm install
-cp .env.example .env    # add your own GEMINI_API_KEY; never commit .env
+git clone https://github.com/aaryanvani-PM/CascadeEval.git
+cd CascadeEval
+npm install --legacy-peer-deps --no-save --package-lock=false react-is@19
 npm run dev
 ```
 
-Without a key, the app runs in sandbox mode with simulated responses.
+Open `http://localhost:3000`. No key is needed for sandbox mode.
+
+For live generation, copy `.env.example` to `.env`, replace `MY_GEMINI_API_KEY` with your own key, restart, and enable **Live Gemini Mode** using the top-right toggle. Leave the key unset for sandbox use; the example value is a placeholder. Keep `.env` out of Git. Live calls use your provider quota. The route endpoint has an in-memory 25-per-hour IP-based quota; the judge endpoint does not share that limiter.
+
+```bash
+npm run lint    # TypeScript check
+npm run build   # Frontend bundle
+```
+
+TypeScript and the frontend build passed with that workaround. Repairing the dependency manifest/lockfile remains follow-up work. The API needs Express: `npm run preview` serves frontend assets only. After building, `NODE_ENV=production npm start` serves the bundle and API together. The current server has no authentication or production access controls.
+
+## Next evidence to collect
+
+1. Label a held-out prompt set with human-reviewed acceptable answers and minimum suitable tiers.
+2. Compare routing against fixed-tier baselines on the same prompts; retain provider usage, model versions, and observed latency.
+3. Report misroutes, quality failures, and cost per acceptable answer, with sample size and uncertainty.
+4. Implement independent order-swapped judging and calibrate against human ratings before claiming bias checks or quality parity.
+
+Start with [`server.ts`](server.ts), [`finopsMath.ts`](src/utils/finopsMath.ts), and [`TelemetryDashboard.tsx`](src/components/TelemetryDashboard.tsx).
